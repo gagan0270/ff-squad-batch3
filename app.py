@@ -655,7 +655,7 @@ def accept_team_invite(target_uid, group_id, key, iv, region="IND"):
 def start_match_team(account_id, key, iv, region="IND"):
     reg = str(region).upper() if region else "IND"
     pfx = "0514" if reg == "IND" else "0515"
-    fields = {1: 9, 2: {1: int(account_id), 7: {1: "IDC3", 2: 410, 3: reg}}}
+    fields = {1: 9, 2: {1: int(account_id)}}
     return create_packet(create_proto(fields).hex(), pfx, key, iv)
 
 def ready_for_game(uid, key, iv, region="IND"):
@@ -1633,6 +1633,15 @@ async def _handle_team_invite(hex_data, pl, uid_str, current_account_data,
                 await asyncio.sleep(0.8)
             if accepted:
                 await _team_member_join(uid_str)
+                await asyncio.sleep(0.5)
+                try:
+                    my_acc_id = current_account_data.get('account_id', uid_str) if current_account_data else uid_str
+                    rdy = ready_for_game(int(my_acc_id), current_key, current_iv, region=account_region)
+                    if writer and not writer.is_closing():
+                        writer.write(rdy); await writer.drain()
+                        print_success(f"[TEAM-IN {uid_str}] 🎮 Auto-Ready sent upon joining team")
+                except Exception as e:
+                    print_warning(f"[TEAM-IN {uid_str}] auto-ready err: {e}")
             return True
         return False
     except Exception as e:
@@ -1687,8 +1696,11 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
             if not is_leader:
                 print_info(f"[TEAM] {uid_str} waiting as member...")
                 return
-            if n < TEAM_SIZE:
-                print_warning(f"[TEAM] Only {n}/{TEAM_SIZE} peers")
+            if n < 2:
+                print_warning(f"[TEAM] Only {n}/{TEAM_SIZE} peers online — waiting for squad")
+                return
+            elif n < TEAM_SIZE:
+                print_warning(f"[TEAM] Only {n}/{TEAM_SIZE} peers online — proceeding with available squad")
             else:
                 print_success(f"[TEAM] ✅ All {n} peers online")
 
@@ -1768,36 +1780,35 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
             final_cnt = await _team_member_count()
             print_colored(f"[TEAM] ══ FINAL: In team ({final_cnt}/{TEAM_SIZE}) ══", Colors.MAGENTA)
 
-            if final_cnt < TEAM_SIZE:
+            if final_cnt < 2:
                 print_error(f"[TEAM] Only {final_cnt}/{TEAM_SIZE} joined — abort, retry")
                 heartbeat_stop.set()
                 try: hb_task.cancel(); await hb_task
                 except Exception: pass
                 return
+            elif final_cnt < TEAM_SIZE:
+                print_warning(f"[TEAM] In team ({final_cnt}/{TEAM_SIZE}) — proceeding with available squad members")
+            else:
+                print_success(f"[TEAM] 🎉 Full team ready ({final_cnt}/{TEAM_SIZE})!")
 
-            await asyncio.sleep(TEAM_FINAL_WAIT)
+            await asyncio.sleep(2.0)
             heartbeat_stop.set()
             try: hb_task.cancel(); await hb_task
             except Exception: pass
 
-            print_success(f"[TEAM] 🚀 {uid_str} loop: ready → 1s → start (every 5s)")
+            print_success(f"[TEAM] 🚀 Leader {uid_str} starting matchmaking (every {START_MATCH_INTERVAL}s)...")
             while _team_active["flag"]:
                 try:
                     if bot_state.is_paused(uid_str): break
                     async with _team_state["lock"]:
                         if _team_state["leader_uid"] != uid_str: break
                     oid = current_account_data.get('account_id', own_id_num) if current_account_data else own_id_num
-                    try:
-                        rdy = ready_for_game(int(oid), current_key, current_iv, region=account_region)
-                        if _writer_ref["w"] and not _writer_ref["w"].is_closing():
-                            _writer_ref["w"].write(rdy); await _writer_ref["w"].drain()
-                    except Exception as e: print_warning(f"[TEAM] ready err: {e}")
-                    await asyncio.sleep(1.0)
                     sm = start_match_team(int(oid), current_key, current_iv, region=account_region)
                     if _writer_ref["w"] and not _writer_ref["w"].is_closing():
                         _writer_ref["w"].write(sm); await _writer_ref["w"].drain()
+                        print_info(f"[TEAM] 🎯 {uid_str} sent start_match_team")
                 except Exception as e: print_warning(f"[TEAM] start err: {e}")
-                try: await asyncio.wait_for(asyncio.sleep(5.0), timeout=5.5)
+                try: await asyncio.wait_for(asyncio.sleep(START_MATCH_INTERVAL), timeout=START_MATCH_INTERVAL + 0.5)
                 except asyncio.TimeoutError: pass
         except asyncio.CancelledError: raise
         except Exception as e:
@@ -1806,24 +1817,19 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
 
     async def _member_match_trigger():
         try:
-            await asyncio.sleep(TEAM_READY_DELAY + TEAM_MEMBER_START_DELAY)
+            await asyncio.sleep(TEAM_READY_DELAY)
             async with _team_state["lock"]:
                 if _team_state["leader_uid"] == uid_str: return
-            print_success(f"[TEAM] 🚀 Member {uid_str}: ready → 1s → start (every 5s)")
+            print_success(f"[TEAM] 🎮 Member {uid_str}: keeping ready state active")
             my_id = current_account_data.get('account_id', uid_str) if current_account_data else uid_str
             while _team_active["flag"]:
                 try:
                     if bot_state.is_paused(uid_str): break
                     if _writer_ref["w"] and not _writer_ref["w"].is_closing():
-                        try:
-                            rdy = ready_for_game(int(my_id), current_key, current_iv, region=account_region)
-                            _writer_ref["w"].write(rdy); await _writer_ref["w"].drain()
-                        except Exception as e: print_warning(f"[TEAM] member ready err: {e}")
-                        await asyncio.sleep(1.0)
-                        sm = start_match_team(int(my_id), current_key, current_iv, region=account_region)
-                        _writer_ref["w"].write(sm); await _writer_ref["w"].drain()
-                except Exception as e: print_warning(f"[TEAM] member trigger: {e}")
-                try: await asyncio.wait_for(asyncio.sleep(5.0), timeout=5.5)
+                        rdy = ready_for_game(int(my_id), current_key, current_iv, region=account_region)
+                        _writer_ref["w"].write(rdy); await _writer_ref["w"].drain()
+                except Exception as e: print_warning(f"[TEAM] member ready err: {e}")
+                try: await asyncio.wait_for(asyncio.sleep(8.0), timeout=8.5)
                 except asyncio.TimeoutError: pass
         except asyncio.CancelledError: raise
         except Exception as e: print_warning(f"[TEAM] member outer: {e}")
@@ -2481,15 +2487,26 @@ def load_accounts():
 
 # ═══════════════════════════ MAIN ═══════════════════════════
 async def main():
+    global TEAM_SIZE, TEAM_MODE
+    accounts = load_accounts()
+    if len(accounts) > 1:
+        TEAM_SIZE = len(accounts)
+        TEAM_MODE = True
+    elif len(accounts) == 1:
+        TEAM_SIZE = 1
+        TEAM_MODE = False
+
     print_colored("=" * 60, Colors.CYAN)
     print_colored("  TEAM RBC — Squad Bot (Create/Invite/Accept/PK)", Colors.GREEN)
     print_colored("=" * 60, Colors.CYAN)
     print_info(f"Match interval: {START_MATCH_INTERVAL}s | Offline: {NEW_MATCH_DELAY}s")
     print_info("Mode: BATTLE ROYALE ONLY")
     if TEAM_MODE:
-        print_success(f"[SQUAD] size={TEAM_SIZE} peer_wait={TEAM_PEER_WAIT_TIMEOUT}s")
+        print_success(f"[SQUAD] size={TEAM_SIZE} peer_wait={TEAM_PEER_WAIT_TIMEOUT}s (dynamic from {len(accounts)} accounts)")
         print_info(f"  invite_cycle={TEAM_INVITE_CYCLE_WAIT}s | max_time={TEAM_INVITE_MAX_TIME}s")
         print_info(f"  heartbeat={TEAM_HEARTBEAT_INTERVAL}s | final_wait={TEAM_FINAL_WAIT}s")
+    else:
+        print_info("[CONFIG] Solo mode active (1 account)")
     print_colored("=" * 60, Colors.CYAN)
 
     try:
@@ -2515,7 +2532,6 @@ async def main():
         bot_state.refresh_callbacks["on_refresh_account"] = on_refresh_account
     except Exception: pass
 
-    accounts = load_accounts()
     if not accounts:
         print_warning(f"No accounts in {ACCOUNTS_FILE}. Add via dashboard.")
     for acc in accounts:
