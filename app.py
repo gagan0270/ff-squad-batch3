@@ -27,11 +27,11 @@ from dashboard_server import bot_state, start_web_dashboard
 
 # ═══════════════════════════ CONFIG ═══════════════════════════
 WEB_HOST = "0.0.0.0"
-WEB_PORT = 20333
+WEB_PORT = int(os.environ.get("PORT", 20333))
 ACCOUNTS_FILE = "accounts.json"
 TOKEN_CACHE_FILE = "token_cache.json"
 DEVICES_FILE = "devices.json"
-TOKEN_CACHE_TTL = 4500
+TOKEN_CACHE_TTL = 86400
 
 START_MATCH_INTERVAL    = 4.0
 NEW_MATCH_DELAY         = 6.0
@@ -86,7 +86,7 @@ FALLBACK_UID = ""
 FALLBACK_PASSWORD = ""
 
 # ═══════════════════════════ SQUAD CONFIG ═══════════════════════════
-TEAM_MODE               = False
+TEAM_MODE               = True
 TEAM_SIZE               = 4
 TEAM_PEER_WAIT_TIMEOUT  = 90.0
 TEAM_CREATE_WAIT        = 4.0
@@ -231,7 +231,7 @@ class Colors:
     CYAN='\033[96m'; MAGENTA='\033[95m'; WHITE='\033[97m'; ENDC='\033[0m'
 
 def print_colored(t, c=Colors.WHITE):
-    try: print(f"{c}{t}{Colors.ENDC}")
+    try: print(f"{c}{t}{Colors.ENDC}", flush=True)
     except Exception: pass
 
 def print_success(t):
@@ -612,44 +612,56 @@ def create_packet(Pk, N, K, V):
     return bytes.fromhex(N + ('0' * pad_len) + hexlen + PkEnc)
 
 # ═══════════ SQUAD PACKETS ═══════════
-def create_team(key, iv, game_version="1.132.9"):
+def create_team(key, iv, game_version="1.132.9", region="IND"):
+    reg = str(region).upper() if region else "IND"
     fields = {
         1: 1, 2: {2: bytes.fromhex("01"), 3: 1, 4: 3, 5: "en",
-            8: {1: "IDC3", 2: 123, 3: "ID"}, 9: 1,
+            8: {1: "IDC3", 2: 123, 3: reg}, 9: 1,
             10: bytes.fromhex("01090a0b1219202729"), 11: 2, 13: 1,
             14: {1: "08FBA33B4BABE2790205390333330000009700050092005F72697EB2134DCBB2467625142201040e38e848dc0e748c3f6aa04d81000000ff1113090dcacfa16d",
                  2: 478, 3: "7e585d55", 4: "y[Z]", 6: 12, 7: "15686677735a7506101c",
                  8: str(game_version), 9: 3, 10: 1, 11: "03626253513637754174"},
             19: 329, 21: bytes.fromhex("374f521955"), 24: {1: 21},
             27: "a_6534489873065906362"}}
-    return create_packet(create_proto(fields).hex(), "0515", key, iv)
+    pfx = "0514" if reg == "IND" else "0515"
+    return create_packet(create_proto(fields).hex(), pfx, key, iv)
 
-def team_fresh(account_id, key, iv):
-    return create_packet(create_proto({1: 72, 2: {1: int(account_id)}}).hex(), "0515", key, iv)
+def team_fresh(account_id, key, iv, region="IND"):
+    reg = str(region).upper() if region else "IND"
+    pfx = "0514" if reg == "IND" else "0515"
+    return create_packet(create_proto({1: 72, 2: {1: int(account_id)}}).hex(), pfx, key, iv)
 
-def invite_player_in_team(target_uid, key, iv, region="ID"):
-    return create_packet(create_proto({1: 2, 2: {1: int(target_uid), 2: region, 4: 1}}).hex(),
-                         "0515", key, iv)
+def invite_player_in_team(target_uid, key, iv, region="IND"):
+    reg = str(region).upper() if region else "IND"
+    pfx = "0514" if reg == "IND" else "0515"
+    return create_packet(create_proto({1: 2, 2: {1: int(target_uid), 2: reg, 4: 1}}).hex(),
+                         pfx, key, iv)
 
-def accept_team_invite(target_uid, group_id, key, iv):
+def accept_team_invite(target_uid, group_id, key, iv, region="IND"):
+    reg = str(region).upper() if region else "IND"
     fields = {1: 4, 2: {1: int(target_uid), 3: int(target_uid),
         4: bytes.fromhex("0107090a0b120f19202729"), 8: 1,
         9: {1: "08FBA33B0522052002041B0222220007000C00010004000547E265AE1080779546762514110104076fa2e8770e748c3f6a68ed75000000ff08080500cacfa16d",
             2: 235, 3: {14: 80, 11: 86}, 4: "{Y\\R", 6: 13, 7: {2: 4},
             8: "1.132.9", 9: 2, 10: 1, 11: "0362625351"},
         10: str(group_id),
-        11: {"1": "IDC3", "2": 107, "3": "ID"}, 13: "en", 16: "374f5219",
+        11: {"1": "IDC3", "2": 107, "3": reg}, 13: "en", 16: "374f5219",
         20: {1: 21}, 23: "a_6534489873065906362",
         24: "https://dl-sg-production.freefiremobile.com/",
         27: {1: 2, 2: 4}}}
-    return create_packet(create_proto(fields).hex(), "0515", key, iv)
+    pfx = "0514" if reg == "IND" else "0515"
+    return create_packet(create_proto(fields).hex(), pfx, key, iv)
 
-def start_match_team(account_id, key, iv, region="ID"):
-    fields = {1: 9, 2: {1: int(account_id), 7: {1: "IDC3", 2: 410, 3: region}}}
-    return create_packet(create_proto(fields).hex(), "0515", key, iv)
+def start_match_team(account_id, key, iv, region="IND"):
+    reg = str(region).upper() if region else "IND"
+    pfx = "0514" if reg == "IND" else "0515"
+    fields = {1: 9, 2: {1: int(account_id), 7: {1: "IDC3", 2: 410, 3: reg}}}
+    return create_packet(create_proto(fields).hex(), pfx, key, iv)
 
-def ready_for_game(uid, key, iv):
-    return create_packet(create_proto({1: 15, 2: {1: uid, 2: 1}}).hex(), "0519", key, iv)
+def ready_for_game(uid, key, iv, region="IND"):
+    reg = str(region).upper() if region else "IND"
+    pfx = "0514" if reg == "IND" else "0519"
+    return create_packet(create_proto({1: 15, 2: {1: uid, 2: 1}}).hex(), pfx, key, iv)
 
 # ═══════════════════════════ MAJORLOGIN / GETLOGIN ═══════════════════════════
 async def build_majorlogin_payload(open_id, access_token, platform, client_version, dev):
@@ -1231,7 +1243,7 @@ async def movement_worker(sock, ip, port, udp_key_bytes, match_code, account_id,
                 pkt = await build_movement_packet_2001(udp_key_bytes, 0x6B, ps, x, y, z, tick, cnt, ms,
                                                        account_id, match_code, phase="arena")
                 await loop.sock_sendto(sock, pkt, addr); sent += 1
-                if sent % 30 == 0: print_info(f"[MOVE] #{match_index} sent={sent} {st}({ps}) rate={sm}x")
+                if sent % 15 == 0: print_info(f"[MOVE] #{match_index} sent={sent} {st.upper()} | anti-afk active")
                 base = MOVEMENT_TICK_MS / 1000.0
                 try: smx = max(0.7, min(float(sm), 1.6))
                 except Exception: smx = 1.0
@@ -1268,7 +1280,10 @@ async def anti_afk_worker(sock, ip, port, udp_key_bytes, match_code, account_id,
         await asyncio.sleep(bypass_jitter(2.5, 0.5))
         while not stop_event.is_set():
             try:
-                if await send_anti_afk_fire(sock, addr, udp_key_bytes, match_code, account_id): fires += 1
+                if await send_anti_afk_fire(sock, addr, udp_key_bytes, match_code, account_id):
+                    fires += 1
+                    if fires % 5 == 0:
+                        print_info(f"[ANTI-AFK] #{match_index} weapon bursts={fires} active (combat simulated)")
                 w = random.uniform(ANTI_AFK_MIN_INTERVAL, ANTI_AFK_MAX_INTERVAL)
                 w = bypass_packet_jitter(w, 0.25)
                 try: await asyncio.wait_for(stop_event.wait(), timeout=w); break
@@ -1507,7 +1522,7 @@ def _wrap_manual(inner):
 
 # ═══════════════════════════ TEAM INVITE HANDLER ═══════════════════════════
 async def _handle_team_invite(hex_data, pl, uid_str, current_account_data,
-                              current_key, current_iv, writer):
+                              current_key, current_iv, writer, account_region="IND"):
     try:
         if DEBUG_TEAM_PACKETS:
             print_info(f"[TEAM-IN {uid_str}] len={pl} hex={hex_data[:80]}")
@@ -1606,7 +1621,7 @@ async def _handle_team_invite(hex_data, pl, uid_str, current_account_data,
             accepted = False
             for attempt in range(3):
                 try:
-                    acc = accept_team_invite(int(inviter), group_id, current_key, current_iv)
+                    acc = accept_team_invite(int(inviter), group_id, current_key, current_iv, region=account_region)
                     if writer and not writer.is_closing():
                         writer.write(acc); await writer.drain()
                         print_success(f"[TEAM-IN {uid_str}] ✅ accept #{attempt+1} ({len(acc)}B)")
@@ -1689,7 +1704,7 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                 except Exception: own_id_num = 0
 
             try:
-                pkt = create_team(current_key, current_iv, client_version)
+                pkt = create_team(current_key, current_iv, client_version, region=account_region)
                 if _writer_ref["w"] and not _writer_ref["w"].is_closing():
                     _writer_ref["w"].write(pkt); await _writer_ref["w"].drain()
                     print_info(f"[TEAM] create_team sent ({len(pkt)}B)")
@@ -1715,7 +1730,7 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                 while not heartbeat_stop.is_set():
                     try:
                         if _writer_ref["w"] and not _writer_ref["w"].is_closing():
-                            pkt = team_fresh(int(own_id_num), current_key, current_iv)
+                            pkt = team_fresh(int(own_id_num), current_key, current_iv, region=account_region)
                             _writer_ref["w"].write(pkt); await _writer_ref["w"].drain()
                     except Exception: pass
                     try: await asyncio.wait_for(heartbeat_stop.wait(), timeout=TEAM_HEARTBEAT_INTERVAL)
@@ -1771,7 +1786,7 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                         if _team_state["leader_uid"] != uid_str: break
                     oid = current_account_data.get('account_id', own_id_num) if current_account_data else own_id_num
                     try:
-                        rdy = ready_for_game(int(oid), current_key, current_iv)
+                        rdy = ready_for_game(int(oid), current_key, current_iv, region=account_region)
                         if _writer_ref["w"] and not _writer_ref["w"].is_closing():
                             _writer_ref["w"].write(rdy); await _writer_ref["w"].drain()
                     except Exception as e: print_warning(f"[TEAM] ready err: {e}")
@@ -1799,7 +1814,7 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                     if bot_state.is_paused(uid_str): break
                     if _writer_ref["w"] and not _writer_ref["w"].is_closing():
                         try:
-                            rdy = ready_for_game(int(my_id), current_key, current_iv)
+                            rdy = ready_for_game(int(my_id), current_key, current_iv, region=account_region)
                             _writer_ref["w"].write(rdy); await _writer_ref["w"].drain()
                         except Exception as e: print_warning(f"[TEAM] member ready err: {e}")
                         await asyncio.sleep(1.0)
@@ -1973,7 +1988,7 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
 
                     if hex_data.startswith("05") and pl > 10:
                         await _handle_team_invite(hex_data, pl, uid_str, current_account_data,
-                                                  current_key, current_iv, writer)
+                                                  current_key, current_iv, writer, account_region=account_region)
                         continue
 
                     if hex_data.startswith("0300") and 10 < pl < 30:
@@ -2032,6 +2047,8 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                                     mode_id=mid, map_id=mp)
                                 match_index = await _inc_match(uid_str)
                                 total = await _get_total_match_count()
+                                try: bot_state.update_status(uid_str, "IN_MATCH", 1)
+                                except Exception: pass
                                 print_colored(f"[MATCH #{match_index}] UDP -> {server_ip_port} ({tag})", Colors.CYAN)
 
                                 new_match = asyncio.create_task(play_game(
