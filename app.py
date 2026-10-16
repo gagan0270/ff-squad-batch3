@@ -1817,8 +1817,10 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                 await asyncio.sleep(2.0)
                 heartbeat_stop.set()
                 if hb_task:
-                    try: hb_task.cancel(); await hb_task
-                    except Exception: pass
+                    if not hb_task.done():
+                        hb_task.cancel()
+                    try: await hb_task
+                    except (asyncio.CancelledError, Exception): pass
                     hb_task = None
 
                 print_success(f"[TEAM] 🚀 Leader {uid_str} starting matchmaking (every {START_MATCH_INTERVAL}s)...")
@@ -1846,7 +1848,7 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                 if hb_task and not hb_task.done():
                     hb_task.cancel()
                     try: await hb_task
-                    except Exception: pass
+                    except (asyncio.CancelledError, Exception): pass
 
     async def _member_match_trigger():
         while _team_active["flag"]:
