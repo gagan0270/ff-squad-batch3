@@ -1235,15 +1235,17 @@ async def movement_worker(sock, ip, port, udp_key_bytes, match_code, account_id,
     loop = asyncio.get_event_loop(); addr = (ip, port)
     tracker = MovementTracker(pattern=MOVEMENT_PATTERN, radius=MOVEMENT_RADIUS)
     sent = 0
+    t_start = time.time()
     try:
         await asyncio.sleep(bypass_jitter(3.0, 0.5))
         while not stop_event.is_set():
             try:
+                phase = "game" if (time.time() - t_start > 35.0) else "arena"
                 ps, x, y, z, ms, tick, cnt, sm, st = tracker.next()
                 pkt = await build_movement_packet_2001(udp_key_bytes, 0x6B, ps, x, y, z, tick, cnt, ms,
-                                                       account_id, match_code, phase="arena")
+                                                       account_id, match_code, phase=phase)
                 await loop.sock_sendto(sock, pkt, addr); sent += 1
-                if sent % 15 == 0: print_info(f"[MOVE] #{match_index} sent={sent} {st.upper()} | anti-afk active")
+                if sent % 15 == 0: print_info(f"[MOVE] #{match_index} sent={sent} {st.upper()} [{phase.upper()}] | anti-afk active")
                 base = MOVEMENT_TICK_MS / 1000.0
                 try: smx = max(0.7, min(float(sm), 1.6))
                 except Exception: smx = 1.0
