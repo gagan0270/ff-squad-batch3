@@ -434,7 +434,11 @@ async def version_config():
     except Exception: return None
 
 async def get_access_token(uid, password):
-    url = "https://100067.connect.garena.com/oauth/guest/token/grant"
+    urls = [
+        "https://100067.connect.garena.com/oauth/guest/token/grant",
+        "https://43.205.19.48/oauth/guest/token/grant",
+        "https://34.124.234.158/oauth/guest/token/grant"
+    ]
     hdrs = {
         "Host": "100067.connect.garena.com",
         "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12; SM-G998B)",
@@ -447,14 +451,15 @@ async def get_access_token(uid, password):
         "client_id": "100067"
     }
     for attempt in range(5):
-        try:
-            r = await client.post(url, headers=hdrs, data=data)
-            if r.status_code == 200:
-                d = r.json()
-                oid = d.get("open_id"); at = d.get("access_token"); pf = d.get("platform", 4)
-                if oid and at: return oid, at, pf
-            if r.status_code == 429: await asyncio.sleep(1); continue
-        except Exception: pass
+        for target_url in urls:
+            try:
+                r = await client.post(target_url, headers=hdrs, data=data, timeout=8.0)
+                if r.status_code == 200:
+                    d = r.json()
+                    oid = d.get("open_id"); at = d.get("access_token"); pf = d.get("platform", 4)
+                    if oid and at: return oid, at, pf
+                if r.status_code == 429: await asyncio.sleep(1); continue
+            except Exception: pass
         await asyncio.sleep(0.5)
     return None
 
