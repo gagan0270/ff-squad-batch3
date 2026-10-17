@@ -380,6 +380,18 @@ def cache_get(uid):
     cache = _load_token_cache()
     e = cache.get(str(uid))
     if not e: return None
+    # Check JWT expiry directly
+    tok = e.get("token")
+    if tok:
+        try:
+            import jwt
+            d = jwt.decode(tok, options={"verify_signature": False})
+            exp = d.get("exp")
+            if exp and time.time() >= (exp - 120):
+                print_warning(f"[CACHE] Token expired for {uid} -> renewing")
+                cache_invalidate(uid)
+                return None
+        except Exception: pass
     if time.time() - e.get("cached_at", 0) > TOKEN_CACHE_TTL:
         cache_invalidate(uid); return None
     if str(e.get("account_id", "")).isdigit(): e["account_id"] = int(e["account_id"])
@@ -611,63 +623,65 @@ def create_packet(Pk, N, K, V):
     if pad_len < 0: pad_len = 0
     return bytes.fromhex(N + ('0' * pad_len) + hexlen + PkEnc)
 
-# ═══════════ SQUAD PACKETS ═══════════
-def _get_team_packet_prefix(region):
+def get_team_pfx(region="IND"):
     reg = str(region).upper() if region else "IND"
     if reg == "IND": return "0514"
     if reg == "BD": return "0519"
     return "0515"
 
-def create_team(key, iv, game_version="1.132.9", region="IND"):
+# ═══════════ SQUAD PACKETS ═══════════
+def create_team(key, iv, game_version="1.132.11", region="IND"):
     reg = str(region).upper() if region else "IND"
+    pfx = get_team_pfx(region)
+    cluster = "INDC" if reg == "IND" else "IDC3"
     fields = {
         1: 1, 2: {2: bytes.fromhex("01"), 3: 1, 4: 3, 5: "en",
-            8: {1: "IDC3", 2: 123, 3: reg}, 9: 1,
+            8: {1: cluster, 2: 123, 3: reg}, 9: 1,
             10: bytes.fromhex("01090a0b1219202729"), 11: 2, 13: 1,
             14: {1: "08FBA33B4BABE2790205390333330000009700050092005F72697EB2134DCBB2467625142201040e38e848dc0e748c3f6aa04d81000000ff1113090dcacfa16d",
                  2: 478, 3: "7e585d55", 4: "y[Z]", 6: 12, 7: "15686677735a7506101c",
                  8: str(game_version), 9: 3, 10: 1, 11: "03626253513637754174"},
-            19: 329, 21: bytes.fromhex("374f521955"), 24: {1: 21},
-            27: "a_6534489873065906362"}}
-    pfx = _get_team_packet_prefix(reg)
+            17: 2, 20: 3, 21: {1: 2, 2: 4}}
+    }
     return create_packet(create_proto(fields).hex(), pfx, key, iv)
 
 def team_fresh(account_id, key, iv, region="IND"):
-    pfx = _get_team_packet_prefix(region)
+    pfx = get_team_pfx(region)
     return create_packet(create_proto({1: 72, 2: {1: int(account_id)}}).hex(), pfx, key, iv)
 
 def invite_player_in_team(target_uid, key, iv, region="IND"):
     reg = str(region).upper() if region else "IND"
-    pfx = _get_team_packet_prefix(reg)
+    pfx = get_team_pfx(region)
     return create_packet(create_proto({1: 2, 2: {1: int(target_uid), 2: reg, 4: 1}}).hex(),
                          pfx, key, iv)
 
 def accept_team_invite(target_uid, group_id, key, iv, region="IND"):
     reg = str(region).upper() if region else "IND"
+    pfx = get_team_pfx(region)
+    cluster = "INDC" if reg == "IND" else "IDC3"
     fields = {1: 4, 2: {1: int(target_uid), 3: int(target_uid),
         4: bytes.fromhex("0107090a0b120f19202729"), 8: 1,
         9: {1: "08FBA33B0522052002041B0222220007000C00010004000547E265AE1080779546762514110104076fa2e8770e748c3f6a68ed75000000ff08080500cacfa16d",
-            2: 235, 3: {14: 80, 11: 86}, 4: "{Y\\R", 6: 13, 7: {2: 4},
-            8: "1.132.9", 9: 2, 10: 1, 11: "0362625351"},
+            2: 235, 3: {14: 80, 11: 86}, 4: "{Y\R", 6: 13, 7: {2: 4},
+            8: "1.132.11", 9: 2, 10: 1, 11: "0362625351"},
         10: str(group_id),
-        11: {"1": "IDC3", "2": 107, "3": reg}, 13: "en", 16: "374f5219",
+        11: {"1": cluster, "2": 107, "3": reg}, 13: "en", 16: "374f5219",
         20: {1: 21}, 23: "a_6534489873065906362",
         24: "https://dl-sg-production.freefiremobile.com/",
         27: {1: 2, 2: 4}}}
-    pfx = _get_team_packet_prefix(reg)
     return create_packet(create_proto(fields).hex(), pfx, key, iv)
 
 def start_match_team(account_id, key, iv, region="IND"):
-    pfx = _get_team_packet_prefix(region)
+    pfx = get_team_pfx(region)
     fields = {1: 9, 2: {1: int(account_id)}}
     return create_packet(create_proto(fields).hex(), pfx, key, iv)
 
 def ready_for_game(uid, key, iv, region="IND"):
-    pfx = _get_team_packet_prefix(region)
+    pfx = get_team_pfx(region)
     return create_packet(create_proto({1: 15, 2: {1: int(uid), 2: 1}}).hex(), pfx, key, iv)
 
 def exit_team(account_id, key, iv, region="IND"):
-    pfx = _get_team_packet_prefix(region)
+    pfx = get_team_pfx(region)
     fields = {1: 7, 2: {1: int(account_id)}}
     return create_packet(create_proto(fields).hex(), pfx, key, iv)
 
@@ -1644,7 +1658,7 @@ async def _handle_team_invite(hex_data, pl, uid_str, current_account_data,
                 await asyncio.sleep(0.5)
                 try:
                     my_acc_id = current_account_data.get('account_id', uid_str) if current_account_data else uid_str
-                    rdy = ready_for_game(int(my_acc_id), current_key, current_iv, region=account_region)
+                    rdy = ready_for_game(int(my_acc_id), current_key, current_iv)
                     if writer and not writer.is_closing():
                         writer.write(rdy); await writer.drain()
                         print_success(f"[TEAM-IN {uid_str}] 🎮 Auto-Ready sent upon joining team")
@@ -1830,10 +1844,22 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                         async with _team_state["lock"]:
                             if _team_state["leader_uid"] != uid_str: break
                         oid = current_account_data.get('account_id', own_id_num) if current_account_data else own_id_num
+                        try:
+                            rdy = ready_for_game(int(oid), current_key, current_iv, region=account_region)
+                            if _writer_ref["w"] and not _writer_ref["w"].is_closing():
+                                _writer_ref["w"].write(rdy); await _writer_ref["w"].drain()
+                        except Exception as e: print_warning(f"[TEAM] ready err: {e}")
+                        await asyncio.sleep(0.4)
                         sm = start_match_team(int(oid), current_key, current_iv, region=account_region)
                         if _writer_ref["w"] and not _writer_ref["w"].is_closing():
-                            _writer_ref["w"].write(sm); await _writer_ref["w"].drain()
-                            print_info(f"[TEAM] 🎯 {uid_str} sent start_match_team")
+                            for _ in range(3):
+                                _writer_ref["w"].write(sm); await _writer_ref["w"].drain()
+                                await asyncio.sleep(0.2)
+                            print_info(f"[TEAM] 🎯 {uid_str} sent start_match_team burst (pfx={get_team_pfx(account_region)})")
+                            await asyncio.sleep(0.5)
+                            await start_game_battle_royale(account_region, client_version, _writer_ref["w"], current_key, current_iv)
+                            await asyncio.sleep(0.5)
+                            await start_game_battle_royale(account_region, client_version, _writer_ref["w"], current_key, current_iv)
                     except Exception as e: print_warning(f"[TEAM] start err: {e}")
                     try: await asyncio.wait_for(asyncio.sleep(START_MATCH_INTERVAL), timeout=START_MATCH_INTERVAL + 0.5)
                     except asyncio.TimeoutError: pass
@@ -1863,13 +1889,15 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
 
                 async with _team_state["members_lock"]:
                     in_team = uid_str in _team_state["members"]
+                    member_count = len(_team_state["members"])
                 if in_team and _writer_ref["w"] and not _writer_ref["w"].is_closing():
                     my_id = current_account_data.get('account_id', uid_str) if current_account_data else uid_str
                     try:
                         rdy = ready_for_game(int(my_id), current_key, current_iv, region=account_region)
-                        _writer_ref["w"].write(rdy); await _writer_ref["w"].drain()
+                        if _writer_ref["w"] and not _writer_ref["w"].is_closing():
+                            _writer_ref["w"].write(rdy); await _writer_ref["w"].drain()
                     except Exception: pass
-                await asyncio.sleep(6.0)
+                await asyncio.sleep(5.0)
             except asyncio.CancelledError:
                 raise
             except Exception:

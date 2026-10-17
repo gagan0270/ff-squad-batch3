@@ -7,7 +7,7 @@ from google.protobuf import symbol_database as _symbol_database
 from google.protobuf.internal import builder as _builder
 key = bytes([89, 103, 38, 116, 99, 37, 68, 69, 117, 104, 54, 37, 90, 99, 94, 56])
 iv = bytes([54, 111, 121, 90, 68, 114, 50, 50, 69, 51, 121, 99, 104, 106, 77, 37])
-id_clan = 3034881538
+id_clan = 3055273549
 json_data = '''
 {{
     "1": {},
