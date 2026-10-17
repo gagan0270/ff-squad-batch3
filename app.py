@@ -1267,7 +1267,7 @@ async def movement_worker(sock, ip, port, udp_key_bytes, match_code, account_id,
                 pkt = await build_movement_packet_2001(udp_key_bytes, 0x6B, ps, x, y, z, tick, cnt, ms,
                                                        account_id, match_code, phase=phase)
                 await loop.sock_sendto(sock, pkt, addr); sent += 1
-                if sent % 15 == 0: print_info(f"[MOVE] #{match_index} sent={sent} {st.upper()} [{phase.upper()}] | anti-afk active")
+                if sent % 15 == 0: print_info(f"[MOVE] #{match_index} ({account_id}) sent={sent} {st.upper()} [{phase.upper()}] | anti-afk active")
                 base = MOVEMENT_TICK_MS / 1000.0
                 try: smx = max(0.7, min(float(sm), 1.6))
                 except Exception: smx = 1.0
@@ -1278,7 +1278,7 @@ async def movement_worker(sock, ip, port, udp_key_bytes, match_code, account_id,
             except asyncio.CancelledError: break
             except Exception: await asyncio.sleep(0.5)
     except asyncio.CancelledError: pass
-    finally: print_info(f"[MOVE] #{match_index} stopped sent={sent}")
+    finally: print_info(f"[MOVE] #{match_index} ({account_id}) stopped sent={sent}")
 
 async def send_anti_afk_fire(sock, addr, udp_key_bytes, match_code, account_id):
     try:
@@ -1307,7 +1307,7 @@ async def anti_afk_worker(sock, ip, port, udp_key_bytes, match_code, account_id,
                 if await send_anti_afk_fire(sock, addr, udp_key_bytes, match_code, account_id):
                     fires += 1
                     if fires % 5 == 0:
-                        print_info(f"[ANTI-AFK] #{match_index} weapon bursts={fires} active (combat simulated)")
+                        print_info(f"[ANTI-AFK] #{match_index} ({account_id}) weapon bursts={fires} active (combat simulated)")
                 w = random.uniform(ANTI_AFK_MIN_INTERVAL, ANTI_AFK_MAX_INTERVAL)
                 w = bypass_packet_jitter(w, 0.25)
                 try: await asyncio.wait_for(stop_event.wait(), timeout=w); break
@@ -1316,7 +1316,7 @@ async def anti_afk_worker(sock, ip, port, udp_key_bytes, match_code, account_id,
             except Exception: await asyncio.sleep(1.0)
     except asyncio.CancelledError: pass
     finally:
-        if fires > 0: print_info(f"[AFK] #{match_index} Fires={fires}")
+        if fires > 0: print_info(f"[AFK] #{match_index} ({account_id}) Fires={fires}")
 
 # ═══════════════════════════ PLAY GAME ═══════════════════════════
 async def play_game(server_ip_port, thunder, sharma, udp_key, match_code,
@@ -1344,7 +1344,7 @@ async def play_game(server_ip_port, thunder, sharma, udp_key, match_code,
         send_lock = asyncio.Lock(); anti_started = False
         ping_task = asyncio.create_task(keepalive_ping(sock, rip, port, udp_key_bytes, match_code, ping_stop))
         last_activity = time.time()
-        print_colored(f"[MATCH #{match_index}] UDP -> {server_ip_port} (DNS:{rip})", Colors.MAGENTA)
+        print_colored(f"[MATCH #{match_index} ({account_id})] UDP -> {server_ip_port} (DNS:{rip})", Colors.MAGENTA)
 
         async def start_workers():
             nonlocal anti_task, move_task, anti_started
@@ -1352,11 +1352,11 @@ async def play_game(server_ip_port, thunder, sharma, udp_key, match_code,
             anti_started = True
             anti_task = asyncio.create_task(anti_afk_worker(sock, rip, port, udp_key_bytes, match_code,
                                                             account_id, anti_stop, match_index))
-            print_success(f"[AFK] Worker #{match_index}")
+            print_success(f"[AFK] Worker #{match_index} ({account_id})")
             if ENABLE_SPEED_MOVEMENT:
                 move_task = asyncio.create_task(movement_worker(sock, rip, port, udp_key_bytes, match_code,
                                                                 account_id, move_stop, match_index))
-                print_success(f"[MOVE] Worker #{match_index} | {MOVEMENT_PATTERN}")
+                print_success(f"[MOVE] Worker #{match_index} ({account_id}) | {MOVEMENT_PATTERN}")
 
         async def send_startup():
             nonlocal ack_state, thunder_sent
@@ -1373,7 +1373,7 @@ async def play_game(server_ip_port, thunder, sharma, udp_key, match_code,
                     await asyncio.sleep(bypass_jitter(0.2, 0.05))
                     await loop.sock_sendto(sock, bytes.fromhex(sharma), (rip, port))
                     ack_state = "thunder_sharma_sent"
-                    print_success(f"[MATCH #{match_index}] Startup delivered")
+                    print_success(f"[MATCH #{match_index} ({account_id})] Startup delivered")
                     await start_workers()
                 except Exception as e: print_error(f"[MATCH #{match_index}] startup: {e}")
 
@@ -1387,7 +1387,7 @@ async def play_game(server_ip_port, thunder, sharma, udp_key, match_code,
                     if frame:
                         pt = await classify(frame)
                         if frame['cmd'] in [103, 107]:
-                            print_success(f"[MATCH #{match_index}] END cmd={frame['cmd']}")
+                            print_success(f"[MATCH #{match_index} ({account_id})] END cmd={frame['cmd']}")
                             completed = True; local_closed = True; continue
                         if frame['cmd'] == 101:
                             try:
@@ -1428,10 +1428,10 @@ async def play_game(server_ip_port, thunder, sharma, udp_key, match_code,
                         except Exception: pass
                         last_activity = time.time()
                     if (time.time() - t0) > 25.0:
-                        print_warning(f"[MATCH #{match_index}] Handshake timeout"); break
+                        print_warning(f"[MATCH #{match_index} ({account_id})] Handshake timeout"); break
                 elif ack_state == "thunder_sharma_sent":
                     if (time.time() - last_activity) > MATCH_IDLE_TIMEOUT:
-                        print_success(f"[MATCH #{match_index}] Finished naturally")
+                        print_success(f"[MATCH #{match_index} ({account_id})] Finished naturally")
                         completed = True; break
                 continue
             except BlockingIOError: await asyncio.sleep(0.05)
@@ -1441,7 +1441,7 @@ async def play_game(server_ip_port, thunder, sharma, udp_key, match_code,
                 await start_startup_safe(send_startup)
         return f"match #{match_index} finished"
     except Exception as e:
-        print_error(f"[MATCH #{match_index}] {e}"); return f"match #{match_index} error"
+        print_error(f"[MATCH #{match_index} ({account_id})] {e}"); return f"match #{match_index} error"
     finally:
         if completed:
             try: bot_state.increment_match(uid_str)
@@ -1467,7 +1467,7 @@ async def play_game(server_ip_port, thunder, sharma, udp_key, match_code,
             except Exception: pass
         rem = await _dec_match(uid_str)
         total = await _get_total_match_count()
-        print_info(f"[MATCH #{match_index}] Closed. UID:{rem} Total:{total}")
+        print_info(f"[MATCH #{match_index} ({account_id})] Closed. UID:{rem} Total:{total}")
         try: bot_state.update_status(uid_str, "IN_MATCH" if rem > 0 else "ONLINE", rem)
         except Exception: pass
 
@@ -1720,9 +1720,9 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                     await asyncio.sleep(2.0)
                     continue
 
-                # Wait for squad peers to connect (fast-path if full team ready, or wait up to 10s)
+                # Wait for squad peers to connect (fast-path if full team ready, or wait up to 20s)
                 wait_start = time.time()
-                while time.time() - wait_start < 10.0:
+                while time.time() - wait_start < 20.0:
                     async with _team_state["lock"]:
                         n = len(_team_state["peers"])
                     if n >= TEAM_SIZE:
@@ -1997,10 +1997,12 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                 print_success(f"[FUNC] TCP connected {uid_str} (DNS:{rip} Lvl:{current_level} R:{current_search_region})")
                 reconnects = 0; no_response_count = 0; last_start_time = 0.0
 
+                match_queue = asyncio.Queue()
                 async with _team_state["lock"]:
                     _team_state["peers"][uid_str] = {
                         "writer": writer, "data": current_account_data,
-                        "key": current_key, "iv": current_iv}
+                        "key": current_key, "iv": current_iv,
+                        "match_queue": match_queue}
                     if _team_state["leader_uid"] is None:
                         _team_state["leader_uid"] = uid_str
                         print_success(f"[TEAM] 👑 {uid_str} is leader")
@@ -2014,6 +2016,81 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                     except Exception: pass
                     await start_game_battle_royale(current_search_region, client_version, writer, current_key, current_iv)
 
+                async def _execute_match_session(minfo):
+                    nonlocal team_coord_task, member_trigger_task, consecutive_parse_failures
+                    for tk in (team_coord_task, member_trigger_task):
+                        if tk and not tk.done():
+                            tk.cancel()
+                            try: await tk
+                            except asyncio.CancelledError: pass
+                    team_coord_task = None; member_trigger_task = None
+                    _team_active["flag"] = False
+
+                    tkn = minfo["token"]
+                    ukey = minfo["udp_key"]
+                    mcode = minfo["match_code"]
+                    sip = minfo["server_ip_port"]
+                    bval = minfo.get("block_val", 0)
+
+                    effective = current_account_data.get('account_id', uid_str) if current_account_data else uid_str
+                    acc_tok = current_account_data.get('access_token', '') if current_account_data else ""
+                    mid, mp = BR_MODE_ID, BR_MAP_ID
+                    tag = "BATTLE_ROYALE"
+                    print_info(f"[TARGET {uid_str}] {tag} mid={mid} mp={mp}")
+
+                    thunder, sharma = await build_match_startup_packets(
+                        tkn, ukey, mcode, str(effective), bval or 0,
+                        server_ip=sip, region=account_region,
+                        client_version=client_version, access_token=acc_tok,
+                        mode_id=mid, map_id=mp)
+                    match_index = await _inc_match(uid_str)
+                    try: bot_state.update_status(uid_str, "IN_MATCH", 1)
+                    except Exception: pass
+                    print_colored(f"[MATCH #{match_index} ({uid_str})] UDP -> {sip} ({tag})", Colors.CYAN)
+
+                    new_match = asyncio.create_task(play_game(
+                        sip, thunder, sharma, ukey, mcode,
+                        str(effective), current_search_region, client_version,
+                        current_key, current_iv,
+                        match_index=match_index, on_match_complete=trigger_post_match_refresh))
+                    play_matches.append(new_match)
+                    consecutive_parse_failures = 0
+
+                    async def drain_gw():
+                        while not new_match.done():
+                            try:
+                                dg = await asyncio.wait_for(reader.read(4096), timeout=1.0)
+                                if not dg: break
+                                gh = dg.hex()
+                                if gh.startswith("0600") and len(dg) > 20:
+                                    await _process_social_packet(dg, current_account_data, tag="DRAIN")
+                            except asyncio.TimeoutError: continue
+                            except Exception: break
+                    drain_task = asyncio.create_task(drain_gw())
+                    try: await new_match
+                    except Exception as e: print_error(f"[MATCH #{match_index} ({uid_str})] {e}")
+                    finally:
+                        drain_task.cancel()
+                        try: await drain_task
+                        except asyncio.CancelledError: pass
+                    play_matches[:] = [m for m in play_matches if not m.done()]
+                    bot_state.increment_match(uid_str)
+                    bot_state.update_status(uid_str, "ONLINE", 0)
+
+                    async with _team_state["lock"]:
+                        _team_state["peers"].pop(uid_str, None)
+                        if _team_state["leader_uid"] == uid_str:
+                            _team_state["leader_uid"] = next(iter(_team_state["peers"]), None)
+                            if _team_state["leader_uid"]:
+                                print_success(f"[TEAM] 👑 Leadership transferred to {_team_state['leader_uid']}")
+                        _team_state["pk_code"] = None
+                    await _team_member_leave(uid_str)
+                    _team_active["flag"] = True
+                    try: writer.close(); await writer.wait_closed()
+                    except Exception: pass
+                    print_info(f"[FUNC] {uid_str} match finished -> reconnect in {NEW_MATCH_DELAY}s...")
+                    await asyncio.sleep(NEW_MATCH_DELAY)
+
                 while True:
                     play_matches[:] = [m for m in play_matches if not m.done()]
                     active = await _get_match_count(uid_str)
@@ -2024,6 +2101,19 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                         elif not cur_st or cur_st in ("ONLINE", "SEARCHING"):
                             bot_state.update_status(uid_str, "SEARCHING" if not TEAM_MODE else "ONLINE", 0)
                     except Exception: pass
+
+                    # ⭐ Check if match was dispatched to this squad member
+                    pending_match = None
+                    try:
+                        if match_queue and not match_queue.empty():
+                            pending_match = match_queue.get_nowait()
+                    except Exception: pass
+
+                    if pending_match:
+                        print_success(f"[TEAM] 🎮 Squad member {uid_str} received match dispatch! Joining UDP match {pending_match.get('match_code')}...")
+                        await _execute_match_session(pending_match)
+                        reconnect_count_total += 1
+                        break
 
                     now = asyncio.get_running_loop().time()
                     if now - last_watchdog_check >= MATCH_WATCHDOG_CHECK:
@@ -2038,6 +2128,17 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                     try:
                         data = await asyncio.wait_for(reader.read(8192), timeout=0.5)
                     except asyncio.TimeoutError:
+                        pending_match = None
+                        try:
+                            if match_queue and not match_queue.empty():
+                                pending_match = match_queue.get_nowait()
+                        except Exception: pass
+                        if pending_match:
+                            print_success(f"[TEAM] 🎮 Squad member {uid_str} received match dispatch! Joining UDP match {pending_match.get('match_code')}...")
+                            await _execute_match_session(pending_match)
+                            reconnect_count_total += 1
+                            break
+
                         no_response_count += 1
                         if TEAM_MODE:
                             if no_response_count > TEAM_IDLE_ITERS_TEAM:
@@ -2076,14 +2177,6 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                         print_colored("MATCH FOUND! Loading...", Colors.GREEN)
                         print_colored("=" * 60, Colors.GREEN)
 
-                        for tk in (team_coord_task, member_trigger_task):
-                            if tk and not tk.done():
-                                tk.cancel()
-                                try: await tk
-                                except asyncio.CancelledError: pass
-                        team_coord_task = None; member_trigger_task = None
-                        _team_active["flag"] = False
-
                         try:
                             res = json.loads(await decode_protobuf(hex_data[10:]))
                             token = udp_key = match_code = server_ip_port = None
@@ -2101,7 +2194,6 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                             if '5' in res and 'data' in res['5']:
                                 block_val = res['5']['data'].get('1', {}).get('data')
 
-                            effective = match_account_id or account_id or "BD_BOT"
                             if token and udp_key and match_code and server_ip_port:
                                 try:
                                     async with _team_state["lock"]:
@@ -2112,64 +2204,24 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                                     print_colored(f"[PK] 🔑 UDP Key: {udp_key}", Colors.MAGENTA)
                                 except Exception: pass
 
-                                acc_tok = current_account_data.get('access_token', '') if current_account_data else ""
-                                # ⭐ Always Battle Royale
-                                mid, mp = BR_MODE_ID, BR_MAP_ID
-                                tag = "BATTLE_ROYALE"
-                                print_info(f"[TARGET] {tag} mid={mid} mp={mp}")
-                                thunder, sharma = await build_match_startup_packets(
-                                    token, udp_key, match_code, effective, block_val or 0,
-                                    server_ip=server_ip_port, region=account_region,
-                                    client_version=client_version, access_token=acc_tok,
-                                    mode_id=mid, map_id=mp)
-                                match_index = await _inc_match(uid_str)
-                                total = await _get_total_match_count()
-                                try: bot_state.update_status(uid_str, "IN_MATCH", 1)
-                                except Exception: pass
-                                print_colored(f"[MATCH #{match_index}] UDP -> {server_ip_port} ({tag})", Colors.CYAN)
-
-                                new_match = asyncio.create_task(play_game(
-                                    server_ip_port, thunder, sharma, udp_key, match_code,
-                                    effective, current_search_region, client_version,
-                                    current_key, current_iv,
-                                    match_index=match_index, on_match_complete=trigger_post_match_refresh))
-                                play_matches.append(new_match)
-                                consecutive_parse_failures = 0
-
-                                async def drain_gw():
-                                    while not new_match.done():
-                                        try:
-                                            dg = await asyncio.wait_for(reader.read(4096), timeout=1.0)
-                                            if not dg: break
-                                            gh = dg.hex()
-                                            if gh.startswith("0600") and len(dg) > 20:
-                                                await _process_social_packet(dg, current_account_data, tag="DRAIN")
-                                        except asyncio.TimeoutError: continue
-                                        except Exception: break
-                                drain_task = asyncio.create_task(drain_gw())
-                                try: await new_match
-                                except Exception as e: print_error(f"[MATCH #{match_index}] {e}")
-                                finally:
-                                    drain_task.cancel()
-                                    try: await drain_task
-                                    except asyncio.CancelledError: pass
-                                play_matches[:] = [m for m in play_matches if not m.done()]
-                                bot_state.increment_match(uid_str)
-                                bot_state.update_status(uid_str, "ONLINE", 0)
-
+                                minfo = {
+                                    "token": token,
+                                    "udp_key": udp_key,
+                                    "match_code": match_code,
+                                    "server_ip_port": server_ip_port,
+                                    "block_val": block_val or 0
+                                }
+                                # ⭐ Broadcast match to all squad members!
                                 async with _team_state["lock"]:
-                                    _team_state["peers"].pop(uid_str, None)
-                                    if _team_state["leader_uid"] == uid_str:
-                                        _team_state["leader_uid"] = next(iter(_team_state["peers"]), None)
-                                        if _team_state["leader_uid"]:
-                                            print_success(f"[TEAM] 👑 Leadership transferred to {_team_state['leader_uid']}")
-                                    _team_state["pk_code"] = None
-                                await _team_member_leave(uid_str)
-                                _team_active["flag"] = True
-                                try: writer.close(); await writer.wait_closed()
-                                except Exception: pass
-                                print_info(f"[FUNC] {uid_str} reconnect in {NEW_MATCH_DELAY}s...")
-                                await asyncio.sleep(NEW_MATCH_DELAY)
+                                    for peer_uid, pinfo in list(_team_state["peers"].items()):
+                                        if peer_uid != uid_str and "match_queue" in pinfo:
+                                            try:
+                                                pinfo["match_queue"].put_nowait(minfo)
+                                                print_success(f"[TEAM] 📢 Dispatched match {match_code} to squad member {peer_uid}")
+                                            except Exception as mq_err:
+                                                print_warning(f"[TEAM] match dispatch to {peer_uid} err: {mq_err}")
+
+                                await _execute_match_session(minfo)
                                 reconnect_count_total += 1
                                 break
                             else:
