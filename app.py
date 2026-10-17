@@ -33,12 +33,12 @@ TOKEN_CACHE_FILE = "token_cache.json"
 DEVICES_FILE = "devices.json"
 TOKEN_CACHE_TTL = 86400
 
-START_MATCH_INTERVAL    = 4.0
-NEW_MATCH_DELAY         = 6.0
+START_MATCH_INTERVAL    = 2.0
+NEW_MATCH_DELAY         = 1.0
 MAX_MATCH_DURATION      = 3000
-MATCH_IDLE_TIMEOUT      = 90.0
+MATCH_IDLE_TIMEOUT      = 18.0
 EXP_REFRESH_INTERVAL    = 30.0
-EXP_REFRESH_AFTER_MATCH_DELAY = 9.0
+EXP_REFRESH_AFTER_MATCH_DELAY = 1.0
 MAX_CONSECUTIVE_PARSE_FAILURES = 5
 NON_MATCH_RECONNECT_DELAY      = 1.0
 
@@ -85,21 +85,41 @@ PING_REAL_IP     = "103.109.214.211"
 FALLBACK_UID = ""
 FALLBACK_PASSWORD = ""
 
-# ═══════════════════════════ SQUAD CONFIG ═══════════════════════════
-TEAM_MODE               = True
-TEAM_SIZE               = 4
-TEAM_PEER_WAIT_TIMEOUT  = 90.0
-TEAM_CREATE_WAIT        = 4.0
-TEAM_INVITE_CYCLE_WAIT  = 4.0
-TEAM_INVITE_MAX_TIME    = 120.0
-TEAM_HEARTBEAT_INTERVAL = 3.0
+# ═══════════════════════════ SQUAD & SELF-HEALING CONFIG ═══════════════════════════
+TEAM_MODE                    = True
+TEAM_SIZE                    = 4
+MIN_TEAM_SIZE                = 2      # Minimum members required to matchmake (Leader + 1)
+FAST_MATCH_WAIT_SEC          = 2.0    # Window to wait for 3rd/4th bot if >=2 already joined
+MAX_SOLO_INVITE_WAIT         = 5.0    # Max time solo leader waits before disbanding (1 = NO MATCH)
+MAX_MATCH_SEARCH_SEC         = 12.0   # Max matchmaking search time before self-healing disband
+MAX_MEMBER_LOBBY_WAIT        = 12.0   # Max time member waits in lobby without match before self-healing exit
+MEMBER_LEADER_CHECK_INTERVAL = 1.0    # Member heartbeat to verify leader presence
+UDP_HELLO_TIMEOUT            = 8.0    # UDP handshake timeout before auto-reconnect
+UDP_HELLO_RETRY_INTERVAL     = 2.0    # Retransmit hello packet if waiting for reply
+
+TEAM_PEER_WAIT_TIMEOUT  = 10.0
+TEAM_CREATE_WAIT        = 1.0
+TEAM_INVITE_CYCLE_WAIT  = 1.0
+TEAM_INVITE_MAX_TIME    = 15.0
+TEAM_HEARTBEAT_INTERVAL = 2.0
 TEAM_IDLE_ITERS_TEAM    = 1800
-TEAM_MEMBER_START_DELAY = 20.0
-TEAM_FINAL_WAIT         = 8.0
-TEAM_SIZE = 4
-TEAM_READY_DELAY = 5.0
-_accept_friend_request = True
+TEAM_MEMBER_START_DELAY = 10.0
+TEAM_FINAL_WAIT         = 1.0
+TEAM_READY_DELAY        = 0.5
+_accept_friend_request  = True
 DEBUG_TEAM_PACKETS      = True
+
+# SHIELD 1 & 3: Leader Cooldown & Canonical Election
+_leader_cooldowns: Dict[str, float] = {}
+
+def get_canonical_leader(peers: Dict[str, Any], cooldowns: Dict[str, float]) -> Optional[str]:
+    now = time.time()
+    candidates = [uid for uid in peers.keys() if cooldowns.get(uid, 0.0) <= now]
+    if not candidates:
+        candidates = list(peers.keys())
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda x: int(x) if str(x).isdigit() else str(x))[0]
 
 # ═══════════════════════════ ANTI-BAN ═══════════════════════════
 def bypass_jitter(base, spread=0.35):
@@ -191,7 +211,21 @@ def optimize_udp_socket(sock):
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 131072)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 131072)
+        if sys.platform == 'win32':
+            try:
+                SIO_UDP_CONNRESET = 0x9800000C
+                sock.ioctl(SIO_UDP_CONNRESET, struct.pack("I", 0))
+            except Exception: pass
     except Exception: pass
+
+async def safe_drain(writer, timeout=3.0):
+    if writer and not writer.is_closing():
+        try:
+            await asyncio.wait_for(writer.drain(), timeout=timeout)
+        except Exception:
+            try: writer.close()
+            except Exception: pass
+            raise ConnectionResetError("safe_drain timeout or broken pipe")
 
 # ═══════════════════════════ HTTP CLIENT ═══════════════════════════
 client = httpx.AsyncClient(verify=False, timeout=10.0,
@@ -1421,22 +1455,24 @@ async def play_game(server_ip_port, thunder, sharma, udp_key, match_code,
                 if ack_state == "ready_to_send_thunder" and not thunder_sent:
                     await send_startup()
                 elif ack_state == "waiting_for_hello_reply":
-                    if (time.time() - last_activity) > 7.0:
+                    if (time.time() - last_activity) > UDP_HELLO_RETRY_INTERVAL:
                         try:
                             hp = await build_hello_packet(f"{account_id}_2585", udp_key_bytes, match_code)
                             await loop.sock_sendto(sock, bytes.fromhex(hp), (rip, port))
                         except Exception: pass
                         last_activity = time.time()
-                    if (time.time() - t0) > 25.0:
-                        print_warning(f"[MATCH #{match_index} ({account_id})] Handshake timeout"); break
+                    if (time.time() - t0) > UDP_HELLO_TIMEOUT:
+                        print_warning(f"[MATCH #{match_index} ({account_id})] Handshake timeout ({UDP_HELLO_TIMEOUT}s)"); break
                 elif ack_state == "thunder_sharma_sent":
                     if (time.time() - last_activity) > MATCH_IDLE_TIMEOUT:
-                        print_success(f"[MATCH #{match_index} ({account_id})] Finished naturally")
+                        print_success(f"[MATCH #{match_index} ({account_id})] Finished naturally (idle {MATCH_IDLE_TIMEOUT}s)")
                         completed = True; break
                 continue
+            except ConnectionResetError:
+                await asyncio.sleep(0.05); continue
             except BlockingIOError: await asyncio.sleep(0.05)
-            except OSError: await asyncio.sleep(0.5); continue
-            except Exception: await asyncio.sleep(0.5); continue
+            except OSError: await asyncio.sleep(0.1); continue
+            except Exception: await asyncio.sleep(0.1); continue
             if ack_state == "ready_to_send_thunder" and not thunder_sent:
                 await start_startup_safe(send_startup)
         return f"match #{match_index} finished"
@@ -1635,32 +1671,44 @@ async def _handle_team_invite(hex_data, pl, uid_str, current_account_data,
                 _team_state["team_code"] = tc
             print_success(f"[TEAM-IN {uid_str}] 📢 Team Code: {tc}")
 
-        is_member = (_team_state["leader_uid"] != uid_str)
-        if inviter and group_id and is_member:
-            async with _team_state["members_lock"]:
-                already = uid_str in _team_state["members"]
-            if already:
-                return True
+        async with _team_state["members_lock"]:
+            my_members = set(_team_state["members"])
+            already = uid_str in my_members
+
+        # SHIELD 2: Yield-on-Invite Preemption (Anti-Dual-Leader Deadlock)
+        # If this bot is alone in its team (or not in any team), yield immediately to join peer's team!
+        if len(my_members) <= 1 and uid_str in my_members and str(inviter) != uid_str:
+            print_warning(f"[ANTI-DEADLOCK] ⚡ Bot {uid_str} alone in lobby — yielding to peer {inviter}'s invite!")
+            try:
+                my_id = current_account_data.get('account_id', uid_str) if current_account_data else uid_str
+                ext = exit_team(int(my_id), current_key, current_iv, region=account_region)
+                if writer and not writer.is_closing():
+                    writer.write(ext); await safe_drain(writer, timeout=2.0)
+            except Exception: pass
+            await _team_member_leave(uid_str)
+            already = False
+
+        if inviter and group_id and not already and str(inviter) != uid_str:
             print_success(f"[TEAM-IN {uid_str}] 📨 ACCEPT: inviter={inviter} group={group_id[:16]}...")
             accepted = False
             for attempt in range(3):
                 try:
                     acc = accept_team_invite(int(inviter), group_id, current_key, current_iv, region=account_region)
                     if writer and not writer.is_closing():
-                        writer.write(acc); await writer.drain()
+                        writer.write(acc); await safe_drain(writer, timeout=2.0)
                         print_success(f"[TEAM-IN {uid_str}] ✅ accept #{attempt+1} ({len(acc)}B)")
                         accepted = True; break
                 except Exception as e:
                     print_warning(f"[TEAM-IN {uid_str}] accept err #{attempt+1}: {e}")
-                await asyncio.sleep(0.8)
+                await asyncio.sleep(0.4)
             if accepted:
                 await _team_member_join(uid_str)
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.3)
                 try:
                     my_acc_id = current_account_data.get('account_id', uid_str) if current_account_data else uid_str
-                    rdy = ready_for_game(int(my_acc_id), current_key, current_iv)
+                    rdy = ready_for_game(int(my_acc_id), current_key, current_iv, region=account_region)
                     if writer and not writer.is_closing():
-                        writer.write(rdy); await writer.drain()
+                        writer.write(rdy); await safe_drain(writer, timeout=2.0)
                         print_success(f"[TEAM-IN {uid_str}] 🎮 Auto-Ready sent upon joining team")
                 except Exception as e:
                     print_warning(f"[TEAM-IN {uid_str}] auto-ready err: {e}")
@@ -1706,31 +1754,32 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
             heartbeat_stop = asyncio.Event()
             try:
                 if bot_state.is_paused(uid_str):
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(0.5)
                     continue
 
+                # SHIELD 1: Deterministic Canonical Leader Election (Lowest UID)
                 async with _team_state["lock"]:
-                    if _team_state["leader_uid"] is None and _team_state["peers"]:
-                        _team_state["leader_uid"] = next(iter(_team_state["peers"]))
-                    is_leader = (_team_state["leader_uid"] == uid_str)
+                    canonical = get_canonical_leader(_team_state["peers"], _leader_cooldowns)
+                    _team_state["leader_uid"] = canonical
+                    is_leader = (canonical == uid_str)
                     n = len(_team_state["peers"])
                     pk_active = bool(_team_state.get("pk_code"))
 
                 if not is_leader or pk_active:
-                    await asyncio.sleep(2.0)
+                    await asyncio.sleep(0.5)
                     continue
 
-                # Wait for squad peers to connect (fast-path if full team ready, or wait up to 20s)
+                # Fast peer readiness: proceed as soon as >= MIN_TEAM_SIZE peers connect
                 wait_start = time.time()
-                while time.time() - wait_start < 20.0:
+                while time.time() - wait_start < 10.0:
                     async with _team_state["lock"]:
                         n = len(_team_state["peers"])
-                    if n >= TEAM_SIZE:
+                    if n >= MIN_TEAM_SIZE:
                         break
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.3)
 
-                if n < 2 and TEAM_SIZE > 1:
-                    await asyncio.sleep(1.5)
+                if n < MIN_TEAM_SIZE:
+                    await asyncio.sleep(1.0)
                     continue
 
                 await asyncio.sleep(TEAM_READY_DELAY)
@@ -1750,7 +1799,7 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                 try:
                     pkt = create_team(current_key, current_iv, client_version, region=account_region)
                     if _writer_ref["w"] and not _writer_ref["w"].is_closing():
-                        _writer_ref["w"].write(pkt); await _writer_ref["w"].drain()
+                        _writer_ref["w"].write(pkt); await safe_drain(_writer_ref["w"], timeout=2.0)
                         print_info(f"[TEAM] create_team sent ({len(pkt)}B)")
                         await _team_member_reset(keep_leader=False)
                         await _team_member_join(uid_str)
@@ -1764,22 +1813,36 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                         try:
                             if _writer_ref["w"] and not _writer_ref["w"].is_closing():
                                 pkt = team_fresh(int(own_id_num), current_key, current_iv, region=account_region)
-                                _writer_ref["w"].write(pkt); await _writer_ref["w"].drain()
+                                _writer_ref["w"].write(pkt); await safe_drain(_writer_ref["w"], timeout=2.0)
                         except Exception: pass
                         try: await asyncio.wait_for(heartbeat_stop.wait(), timeout=TEAM_HEARTBEAT_INTERVAL)
                         except asyncio.TimeoutError: pass
                 hb_task = asyncio.create_task(heartbeat_loop())
 
-                print_success(f"[TEAM] 🎯 Invite-loop start (max {int(TEAM_INVITE_MAX_TIME)}s)")
+                print_success(f"[TEAM] 🎯 Fast invite-loop start (min {MIN_TEAM_SIZE} members)")
                 invite_start = time.time()
                 cycle = 0
-                while time.time() - invite_start < TEAM_INVITE_MAX_TIME:
+                while True:
                     if not _team_active["flag"]: break
                     if bot_state.is_paused(uid_str): break
                     cnt = await _team_member_count()
+                    elapsed = time.time() - invite_start
+
+                    # Condition A: Full squad ready -> Start immediately!
                     if cnt >= TEAM_SIZE:
-                        print_success(f"[TEAM] 🎉 Full team ({cnt}/{TEAM_SIZE})!")
+                        print_success(f"[TEAM] 🎉 Full squad ready ({cnt}/{TEAM_SIZE})! Starting immediately...")
                         break
+
+                    # Condition B: Minimum threshold met (2 or 3) and fast window passed -> Proceed!
+                    if cnt >= MIN_TEAM_SIZE and elapsed >= FAST_MATCH_WAIT_SEC:
+                        print_success(f"[TEAM] 👥 Squad ready ({cnt} members, min {MIN_TEAM_SIZE})! Proceeding to matchmaking...")
+                        break
+
+                    # Condition C: Solo leader after MAX_SOLO_INVITE_WAIT (5s) -> Disband (1 = NO MATCH)
+                    if cnt < MIN_TEAM_SIZE and elapsed >= MAX_SOLO_INVITE_WAIT:
+                        print_warning(f"[SELF-HEAL] ⚠️ Leader {uid_str} alone ({cnt}/{TEAM_SIZE}) after {int(elapsed)}s — disbanding (1 member = no match)")
+                        break
+
                     cycle += 1
 
                     # Dynamically collect all peers currently connected
@@ -1802,11 +1865,11 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                         try:
                             inv = invite_player_in_team(tuid, current_key, current_iv, region=account_region)
                             if _writer_ref["w"] and not _writer_ref["w"].is_closing():
-                                _writer_ref["w"].write(inv); await _writer_ref["w"].drain()
+                                _writer_ref["w"].write(inv); await safe_drain(_writer_ref["w"], timeout=2.0)
                                 print_success(f"[TEAM] 📨 invite {tuid} cycle#{cycle}")
                         except Exception as e:
                             print_warning(f"[TEAM] invite err: {e}")
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(0.3)
 
                     try: await asyncio.wait_for(heartbeat_stop.wait(), timeout=TEAM_INVITE_CYCLE_WAIT)
                     except asyncio.TimeoutError: pass
@@ -1814,21 +1877,24 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                 final_cnt = await _team_member_count()
                 print_colored(f"[TEAM] ══ FINAL: In team ({final_cnt}/{TEAM_SIZE}) ══", Colors.MAGENTA)
 
-                if final_cnt < 2:
-                    print_error(f"[TEAM] Only {final_cnt}/{TEAM_SIZE} joined — disbanding and retrying")
+                if final_cnt < MIN_TEAM_SIZE:
+                    print_error(f"[SELF-HEAL] ❌ Only {final_cnt} member in team — 1 member = NO MATCH! Disbanding...")
                     try:
                         ext = exit_team(int(own_id_num), current_key, current_iv, region=account_region)
                         if _writer_ref["w"] and not _writer_ref["w"].is_closing():
-                            _writer_ref["w"].write(ext); await _writer_ref["w"].drain()
+                            _writer_ref["w"].write(ext); await safe_drain(_writer_ref["w"], timeout=2.0)
                     except Exception: pass
-                    await asyncio.sleep(2.0)
+                    await _team_member_reset(keep_leader=False)
+                    # SHIELD 3: Leader Cooldown to let another peer lead
+                    _leader_cooldowns[uid_str] = time.time() + 8.0
+                    await asyncio.sleep(0.5)
                     continue
                 elif final_cnt < TEAM_SIZE:
                     print_warning(f"[TEAM] In team ({final_cnt}/{TEAM_SIZE}) — proceeding with available squad members")
                 else:
                     print_success(f"[TEAM] 🎉 Full team ready ({final_cnt}/{TEAM_SIZE})!")
 
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(0.5)
                 heartbeat_stop.set()
                 if hb_task:
                     if not hb_task.done():
@@ -1838,27 +1904,38 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                     hb_task = None
 
                 print_success(f"[TEAM] 🚀 Leader {uid_str} starting matchmaking (every {START_MATCH_INTERVAL}s)...")
+                match_search_start = time.time()
                 while _team_active["flag"]:
                     try:
                         if bot_state.is_paused(uid_str): break
                         async with _team_state["lock"]:
                             if _team_state["leader_uid"] != uid_str: break
+
+                        # SHIELD 5: Matchmaking stall recovery (12s)
+                        if time.time() - match_search_start > MAX_MATCH_SEARCH_SEC:
+                            print_warning(f"[SELF-HEAL] ⚠️ Match search timeout ({int(MAX_MATCH_SEARCH_SEC)}s) without match — disbanding & reforming")
+                            try:
+                                ext = exit_team(int(own_id_num), current_key, current_iv, region=account_region)
+                                if _writer_ref["w"] and not _writer_ref["w"].is_closing():
+                                    _writer_ref["w"].write(ext); await safe_drain(_writer_ref["w"], timeout=2.0)
+                            except Exception: pass
+                            await _team_member_reset(keep_leader=False)
+                            break
+
                         oid = current_account_data.get('account_id', own_id_num) if current_account_data else own_id_num
                         try:
                             rdy = ready_for_game(int(oid), current_key, current_iv, region=account_region)
                             if _writer_ref["w"] and not _writer_ref["w"].is_closing():
-                                _writer_ref["w"].write(rdy); await _writer_ref["w"].drain()
+                                _writer_ref["w"].write(rdy); await safe_drain(_writer_ref["w"], timeout=2.0)
                         except Exception as e: print_warning(f"[TEAM] ready err: {e}")
-                        await asyncio.sleep(0.4)
+                        await asyncio.sleep(0.2)
                         sm = start_match_team(int(oid), current_key, current_iv, region=account_region)
                         if _writer_ref["w"] and not _writer_ref["w"].is_closing():
-                            for _ in range(3):
-                                _writer_ref["w"].write(sm); await _writer_ref["w"].drain()
-                                await asyncio.sleep(0.2)
+                            for _ in range(2):
+                                _writer_ref["w"].write(sm); await safe_drain(_writer_ref["w"], timeout=2.0)
+                                await asyncio.sleep(0.1)
                             print_info(f"[TEAM] 🎯 {uid_str} sent start_match_team burst (pfx={get_team_pfx(account_region)})")
-                            await asyncio.sleep(0.5)
-                            await start_game_battle_royale(account_region, client_version, _writer_ref["w"], current_key, current_iv)
-                            await asyncio.sleep(0.5)
+                            await asyncio.sleep(0.3)
                             await start_game_battle_royale(account_region, client_version, _writer_ref["w"], current_key, current_iv)
                     except Exception as e: print_warning(f"[TEAM] start err: {e}")
                     try: await asyncio.wait_for(asyncio.sleep(START_MATCH_INTERVAL), timeout=START_MATCH_INTERVAL + 0.5)
@@ -1868,7 +1945,7 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
             except Exception as e:
                 print_error(f"[TEAM] coordinator: {e}")
                 traceback.print_exc()
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(1.0)
             finally:
                 heartbeat_stop.set()
                 if hb_task and not hb_task.done():
@@ -1877,31 +1954,54 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                     except (asyncio.CancelledError, Exception): pass
 
     async def _member_match_trigger():
+        joined_team_time = None
         while _team_active["flag"]:
             try:
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(MEMBER_LEADER_CHECK_INTERVAL)
                 if bot_state.is_paused(uid_str): continue
                 async with _team_state["lock"]:
                     is_leader = (_team_state["leader_uid"] == uid_str)
+                    current_leader = _team_state["leader_uid"]
+                    leader_online = current_leader in _team_state["peers"]
                 if is_leader:
-                    await asyncio.sleep(2.0)
+                    joined_team_time = None
                     continue
 
                 async with _team_state["members_lock"]:
                     in_team = uid_str in _team_state["members"]
-                    member_count = len(_team_state["members"])
-                if in_team and _writer_ref["w"] and not _writer_ref["w"].is_closing():
-                    my_id = current_account_data.get('account_id', uid_str) if current_account_data else uid_str
-                    try:
-                        rdy = ready_for_game(int(my_id), current_key, current_iv, region=account_region)
-                        if _writer_ref["w"] and not _writer_ref["w"].is_closing():
-                            _writer_ref["w"].write(rdy); await _writer_ref["w"].drain()
-                    except Exception: pass
-                await asyncio.sleep(5.0)
+
+                if in_team:
+                    if joined_team_time is None:
+                        joined_team_time = time.time()
+                    time_in_team = time.time() - joined_team_time
+
+                    # SHIELD 6: Member Ghost Team Escape Watchdog (leader gone OR wait > 12s)
+                    if not leader_online or time_in_team > MAX_MEMBER_LOBBY_WAIT:
+                        reason = "Leader disconnected" if not leader_online else f"Lobby timeout ({int(time_in_team)}s)"
+                        print_warning(f"[SELF-HEAL] ⚠️ Member {uid_str} ghost team escape: {reason} — exiting team!")
+                        try:
+                            my_id = current_account_data.get('account_id', uid_str) if current_account_data else uid_str
+                            ext = exit_team(int(my_id), current_key, current_iv, region=account_region)
+                            if _writer_ref["w"] and not _writer_ref["w"].is_closing():
+                                _writer_ref["w"].write(ext); await safe_drain(_writer_ref["w"], timeout=2.0)
+                        except Exception: pass
+                        await _team_member_leave(uid_str)
+                        joined_team_time = None
+                        continue
+
+                    # Auto-ready keepalive
+                    if _writer_ref["w"] and not _writer_ref["w"].is_closing():
+                        my_id = current_account_data.get('account_id', uid_str) if current_account_data else uid_str
+                        try:
+                            rdy = ready_for_game(int(my_id), current_key, current_iv, region=account_region)
+                            _writer_ref["w"].write(rdy); await safe_drain(_writer_ref["w"], timeout=2.0)
+                        except Exception: pass
+                else:
+                    joined_team_time = None
             except asyncio.CancelledError:
                 raise
             except Exception:
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(1.0)
 
     try:
         while True:
@@ -1967,11 +2067,19 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                 raw_sock = writer.get_extra_info('socket')
                 if raw_sock: optimize_tcp_socket(raw_sock)
                 await asyncio.sleep(bypass_hello_delay())
-                writer.write(bytes.fromhex(current_token)); await writer.drain()
+                writer.write(bytes.fromhex(current_token)); await safe_drain(writer, timeout=3.0)
                 try:
                     ka = await send_keep_alive(account_region)
                     if ka and not writer.is_closing():
-                        writer.write(ka); await asyncio.wait_for(writer.drain(), timeout=3)
+                        writer.write(ka); await safe_drain(writer, timeout=3.0)
+                except Exception: pass
+
+                # SHIELD 4: Preemptively exit any ghost team lingering on server from past session
+                try:
+                    oid = current_account_data.get('account_id', uid_str) if current_account_data else uid_str
+                    pre_ext = exit_team(int(oid), current_key, current_iv, region=account_region)
+                    if writer and not writer.is_closing():
+                        writer.write(pre_ext); await safe_drain(writer, timeout=2.0)
                 except Exception: pass
 
                 async def func_gateway_keepalive():
@@ -1980,7 +2088,7 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                         await asyncio.sleep(bypass_ka_jitter(5.0))
                         try:
                             if writer and not writer.is_closing():
-                                writer.write(ka_bytes); await writer.drain()
+                                writer.write(ka_bytes); await safe_drain(writer, timeout=3.0)
                         except Exception: break
                 gateway_ping_task = asyncio.create_task(func_gateway_keepalive())
 
@@ -1997,15 +2105,18 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                 print_success(f"[FUNC] TCP connected {uid_str} (DNS:{rip} Lvl:{current_level} R:{current_search_region})")
                 reconnects = 0; no_response_count = 0; last_start_time = 0.0
 
+                # SHIELD 7: Fresh match queue with purge
                 match_queue = asyncio.Queue()
+                await _team_member_leave(uid_str)
                 async with _team_state["lock"]:
                     _team_state["peers"][uid_str] = {
                         "writer": writer, "data": current_account_data,
                         "key": current_key, "iv": current_iv,
                         "match_queue": match_queue}
-                    if _team_state["leader_uid"] is None:
-                        _team_state["leader_uid"] = uid_str
-                        print_success(f"[TEAM] 👑 {uid_str} is leader")
+                    canonical = get_canonical_leader(_team_state["peers"], _leader_cooldowns)
+                    _team_state["leader_uid"] = canonical
+                    if canonical == uid_str:
+                        print_success(f"[TEAM] 👑 {uid_str} is leader (canonical lowest UID)")
 
                 if TEAM_MODE:
                     team_coord_task = asyncio.create_task(_team_coordinator())
@@ -2018,78 +2129,92 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
 
                 async def _execute_match_session(minfo):
                     nonlocal team_coord_task, member_trigger_task, consecutive_parse_failures
-                    for tk in (team_coord_task, member_trigger_task):
-                        if tk and not tk.done():
-                            tk.cancel()
-                            try: await tk
+                    try:
+                        for tk in (team_coord_task, member_trigger_task):
+                            if tk and not tk.done():
+                                tk.cancel()
+                                try: await tk
+                                except asyncio.CancelledError: pass
+                        team_coord_task = None; member_trigger_task = None
+                        _team_active["flag"] = False
+
+                        tkn = minfo["token"]
+                        ukey = minfo["udp_key"]
+                        mcode = minfo["match_code"]
+                        sip = minfo["server_ip_port"]
+                        bval = minfo.get("block_val", 0)
+
+                        effective = current_account_data.get('account_id', uid_str) if current_account_data else uid_str
+                        acc_tok = current_account_data.get('access_token', '') if current_account_data else ""
+                        mid, mp = BR_MODE_ID, BR_MAP_ID
+                        tag = "BATTLE_ROYALE"
+                        print_info(f"[TARGET {uid_str}] {tag} mid={mid} mp={mp}")
+
+                        thunder, sharma = await build_match_startup_packets(
+                            tkn, ukey, mcode, str(effective), bval or 0,
+                            server_ip=sip, region=account_region,
+                            client_version=client_version, access_token=acc_tok,
+                            mode_id=mid, map_id=mp)
+                        match_index = await _inc_match(uid_str)
+                        try: bot_state.update_status(uid_str, "IN_MATCH", 1)
+                        except Exception: pass
+                        print_colored(f"[MATCH #{match_index} ({uid_str})] UDP -> {sip} ({tag})", Colors.CYAN)
+
+                        new_match = asyncio.create_task(play_game(
+                            sip, thunder, sharma, ukey, mcode,
+                            str(effective), current_search_region, client_version,
+                            current_key, current_iv,
+                            match_index=match_index, on_match_complete=trigger_post_match_refresh))
+                        play_matches.append(new_match)
+                        consecutive_parse_failures = 0
+
+                        async def drain_gw():
+                            while not new_match.done():
+                                try:
+                                    dg = await asyncio.wait_for(reader.read(4096), timeout=1.0)
+                                    if not dg: break
+                                    gh = dg.hex()
+                                    if gh.startswith("0600") and len(dg) > 20:
+                                        await _process_social_packet(dg, current_account_data, tag="DRAIN")
+                                except asyncio.TimeoutError: continue
+                                except Exception: break
+                        drain_task = asyncio.create_task(drain_gw())
+                        try: await new_match
+                        except Exception as e: print_error(f"[MATCH #{match_index} ({uid_str})] {e}")
+                        finally:
+                            drain_task.cancel()
+                            try: await drain_task
                             except asyncio.CancelledError: pass
-                    team_coord_task = None; member_trigger_task = None
-                    _team_active["flag"] = False
-
-                    tkn = minfo["token"]
-                    ukey = minfo["udp_key"]
-                    mcode = minfo["match_code"]
-                    sip = minfo["server_ip_port"]
-                    bval = minfo.get("block_val", 0)
-
-                    effective = current_account_data.get('account_id', uid_str) if current_account_data else uid_str
-                    acc_tok = current_account_data.get('access_token', '') if current_account_data else ""
-                    mid, mp = BR_MODE_ID, BR_MAP_ID
-                    tag = "BATTLE_ROYALE"
-                    print_info(f"[TARGET {uid_str}] {tag} mid={mid} mp={mp}")
-
-                    thunder, sharma = await build_match_startup_packets(
-                        tkn, ukey, mcode, str(effective), bval or 0,
-                        server_ip=sip, region=account_region,
-                        client_version=client_version, access_token=acc_tok,
-                        mode_id=mid, map_id=mp)
-                    match_index = await _inc_match(uid_str)
-                    try: bot_state.update_status(uid_str, "IN_MATCH", 1)
-                    except Exception: pass
-                    print_colored(f"[MATCH #{match_index} ({uid_str})] UDP -> {sip} ({tag})", Colors.CYAN)
-
-                    new_match = asyncio.create_task(play_game(
-                        sip, thunder, sharma, ukey, mcode,
-                        str(effective), current_search_region, client_version,
-                        current_key, current_iv,
-                        match_index=match_index, on_match_complete=trigger_post_match_refresh))
-                    play_matches.append(new_match)
-                    consecutive_parse_failures = 0
-
-                    async def drain_gw():
-                        while not new_match.done():
-                            try:
-                                dg = await asyncio.wait_for(reader.read(4096), timeout=1.0)
-                                if not dg: break
-                                gh = dg.hex()
-                                if gh.startswith("0600") and len(dg) > 20:
-                                    await _process_social_packet(dg, current_account_data, tag="DRAIN")
-                            except asyncio.TimeoutError: continue
-                            except Exception: break
-                    drain_task = asyncio.create_task(drain_gw())
-                    try: await new_match
-                    except Exception as e: print_error(f"[MATCH #{match_index} ({uid_str})] {e}")
                     finally:
-                        drain_task.cancel()
-                        try: await drain_task
-                        except asyncio.CancelledError: pass
-                    play_matches[:] = [m for m in play_matches if not m.done()]
-                    bot_state.increment_match(uid_str)
-                    bot_state.update_status(uid_str, "ONLINE", 0)
+                        play_matches[:] = [m for m in play_matches if not m.done()]
+                        try:
+                            bot_state.increment_match(uid_str)
+                            bot_state.update_status(uid_str, "ONLINE", 0)
+                        except Exception: pass
 
-                    async with _team_state["lock"]:
-                        _team_state["peers"].pop(uid_str, None)
-                        if _team_state["leader_uid"] == uid_str:
-                            _team_state["leader_uid"] = next(iter(_team_state["peers"]), None)
-                            if _team_state["leader_uid"]:
-                                print_success(f"[TEAM] 👑 Leadership transferred to {_team_state['leader_uid']}")
-                        _team_state["pk_code"] = None
-                    await _team_member_leave(uid_str)
-                    _team_active["flag"] = True
-                    try: writer.close(); await writer.wait_closed()
-                    except Exception: pass
-                    print_info(f"[FUNC] {uid_str} match finished -> reconnect in {NEW_MATCH_DELAY}s...")
-                    await asyncio.sleep(NEW_MATCH_DELAY)
+                        async with _team_state["lock"]:
+                            _team_state["peers"].pop(uid_str, None)
+                            canonical = get_canonical_leader(_team_state["peers"], _leader_cooldowns)
+                            _team_state["leader_uid"] = canonical
+                            if canonical:
+                                print_success(f"[TEAM] 👑 Leadership transferred to {canonical}")
+                            _team_state["pk_code"] = None
+                        await _team_member_leave(uid_str)
+                        _team_active["flag"] = True
+
+                        # Drain any residual match messages
+                        try:
+                            while match_queue and not match_queue.empty():
+                                match_queue.get_nowait()
+                        except Exception: pass
+
+                        try:
+                            if writer:
+                                writer.close()
+                                await writer.wait_closed()
+                        except Exception: pass
+                        print_info(f"[FUNC] {uid_str} match finished -> reconnect in {NEW_MATCH_DELAY}s...")
+                        await asyncio.sleep(NEW_MATCH_DELAY)
 
                 while True:
                     play_matches[:] = [m for m in play_matches if not m.done()]
@@ -2110,10 +2235,14 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                     except Exception: pass
 
                     if pending_match:
-                        print_success(f"[TEAM] 🎮 Squad member {uid_str} received match dispatch! Joining UDP match {pending_match.get('match_code')}...")
-                        await _execute_match_session(pending_match)
-                        reconnect_count_total += 1
-                        break
+                        dtime = pending_match.get("dispatch_time", 0)
+                        if dtime and (time.time() - dtime > 6.0):
+                            print_warning(f"[SELF-HEAL] Dropped stale match dispatch (>6s old) for {uid_str}")
+                        else:
+                            print_success(f"[TEAM] 🎮 Squad member {uid_str} received match dispatch! Joining UDP match {pending_match.get('match_code')}...")
+                            await _execute_match_session(pending_match)
+                            reconnect_count_total += 1
+                            break
 
                     now = asyncio.get_running_loop().time()
                     if now - last_watchdog_check >= MATCH_WATCHDOG_CHECK:
@@ -2134,10 +2263,14 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                                 pending_match = match_queue.get_nowait()
                         except Exception: pass
                         if pending_match:
-                            print_success(f"[TEAM] 🎮 Squad member {uid_str} received match dispatch! Joining UDP match {pending_match.get('match_code')}...")
-                            await _execute_match_session(pending_match)
-                            reconnect_count_total += 1
-                            break
+                            dtime = pending_match.get("dispatch_time", 0)
+                            if dtime and (time.time() - dtime > 6.0):
+                                print_warning(f"[SELF-HEAL] Dropped stale match dispatch (>6s old) for {uid_str}")
+                            else:
+                                print_success(f"[TEAM] 🎮 Squad member {uid_str} received match dispatch! Joining UDP match {pending_match.get('match_code')}...")
+                                await _execute_match_session(pending_match)
+                                reconnect_count_total += 1
+                                break
 
                         no_response_count += 1
                         if TEAM_MODE:
@@ -2209,12 +2342,16 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                                     "udp_key": udp_key,
                                     "match_code": match_code,
                                     "server_ip_port": server_ip_port,
-                                    "block_val": block_val or 0
+                                    "block_val": block_val or 0,
+                                    "dispatch_time": time.time(),
                                 }
-                                # ⭐ Broadcast match to all squad members!
+                                # ⭐ Broadcast match ONLY to squad members who actually joined this team!
+                                async with _team_state["members_lock"]:
+                                    joined_members = set(_team_state["members"])
+
                                 async with _team_state["lock"]:
                                     for peer_uid, pinfo in list(_team_state["peers"].items()):
-                                        if peer_uid != uid_str and "match_queue" in pinfo:
+                                        if peer_uid != uid_str and str(peer_uid) in joined_members and "match_queue" in pinfo:
                                             try:
                                                 pinfo["match_queue"].put_nowait(minfo)
                                                 print_success(f"[TEAM] 📢 Dispatched match {match_code} to squad member {peer_uid}")
@@ -2253,10 +2390,10 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                 if gateway_ping_task: gateway_ping_task.cancel()
                 async with _team_state["lock"]:
                     _team_state["peers"].pop(uid_str, None)
-                    if _team_state["leader_uid"] == uid_str:
-                        _team_state["leader_uid"] = next(iter(_team_state["peers"]), None)
-                        if _team_state["leader_uid"]:
-                            print_success(f"[TEAM] 👑 Leadership transferred to {_team_state['leader_uid']}")
+                    canonical = get_canonical_leader(_team_state["peers"], _leader_cooldowns)
+                    _team_state["leader_uid"] = canonical
+                    if canonical:
+                        print_success(f"[TEAM] 👑 Leadership transferred to {canonical}")
                 await _team_member_leave(uid_str)
                 raise
             except Exception as e:
@@ -2287,17 +2424,17 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                 if writer and not writer.is_closing():
                     try:
                         ext = exit_team(int(uid_str), current_key, current_iv, region=account_region)
-                        writer.write(ext); await writer.drain()
+                        writer.write(ext); await safe_drain(writer, timeout=2.0)
                     except Exception: pass
                 if writer:
                     try: writer.close(); await writer.wait_closed()
                     except Exception: pass
                 async with _team_state["lock"]:
                     _team_state["peers"].pop(uid_str, None)
-                    if _team_state["leader_uid"] == uid_str:
-                        _team_state["leader_uid"] = next(iter(_team_state["peers"]), None)
-                        if _team_state["leader_uid"]:
-                            print_success(f"[TEAM] 👑 Leadership transferred to {_team_state['leader_uid']}")
+                    canonical = get_canonical_leader(_team_state["peers"], _leader_cooldowns)
+                    _team_state["leader_uid"] = canonical
+                    if canonical:
+                        print_success(f"[TEAM] 👑 Leadership transferred to {canonical}")
                 await _team_member_leave(uid_str)
                 _team_active["flag"] = True
     except asyncio.CancelledError:
@@ -2634,9 +2771,9 @@ async def main():
     print_info(f"Match interval: {START_MATCH_INTERVAL}s | Offline: {NEW_MATCH_DELAY}s")
     print_info("Mode: BATTLE ROYALE ONLY")
     if TEAM_MODE:
-        print_success(f"[SQUAD] size={TEAM_SIZE} peer_wait={TEAM_PEER_WAIT_TIMEOUT}s (dynamic from {len(accounts)} accounts)")
-        print_info(f"  invite_cycle={TEAM_INVITE_CYCLE_WAIT}s | max_time={TEAM_INVITE_MAX_TIME}s")
-        print_info(f"  heartbeat={TEAM_HEARTBEAT_INTERVAL}s | final_wait={TEAM_FINAL_WAIT}s")
+        print_success(f"[SQUAD] size={TEAM_SIZE} min={MIN_TEAM_SIZE} (1 member = NO MATCH) | fast_window={FAST_MATCH_WAIT_SEC}s")
+        print_info(f"  invite_cycle={TEAM_INVITE_CYCLE_WAIT}s | solo_disband={MAX_SOLO_INVITE_WAIT}s | stall_timeout={MAX_MATCH_SEARCH_SEC}s")
+        print_info(f"  heartbeat={TEAM_HEARTBEAT_INTERVAL}s | member_escape={MAX_MEMBER_LOBBY_WAIT}s | idle_timeout={MATCH_IDLE_TIMEOUT}s")
     else:
         print_info("[CONFIG] Solo mode active (1 account)")
     print_colored("=" * 60, Colors.CYAN)
